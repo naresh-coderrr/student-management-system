@@ -2,7 +2,7 @@
 // Viva: every button ends in api(). The login token is attached here.
 // The Supabase secret key is not in this file.
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export const APPROVED_ACCOUNTS = [
   "nareshramrajasimhan18@gmail.com",
