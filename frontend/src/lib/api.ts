@@ -54,6 +54,10 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const [pathname, search] = path.split("?");
+  const cleanPathname = pathname.endsWith("/") && pathname.length > 1 ? pathname.slice(0, -1) : pathname;
+  const cleanPath = search !== undefined ? `${cleanPathname}?${search}` : cleanPathname;
+
   const headers = new Headers(options.headers);
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -61,7 +65,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const token = readToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const response = await fetch(`${API_URL}${path}`, { ...options, headers });
+  const response = await fetch(`${API_URL}${cleanPath}`, { ...options, headers });
   const text = await response.text();
   let payload: unknown = null;
   if (text) {

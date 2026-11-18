@@ -12,22 +12,65 @@ export async function GET(req: Request) {
   }
 
   try {
-    const { data: tablesData, error: tablesErr } = await supabaseAdmin.rpc("get_user_tables");
-    if (tablesErr) {
-      return NextResponse.json({ detail: tablesErr.message }, { status: 500 });
+    let tables: string[] = [];
+
+    // 1. Try get_user_tables RPC
+    try {
+      const { data: tablesData } = await supabaseAdmin.rpc("get_user_tables");
+      if (Array.isArray(tablesData) && tablesData.length > 0) {
+        tables = tablesData
+          .map((t: { table_name?: string } | string) => (typeof t === "string" ? t : t.table_name || ""))
+          .filter(Boolean);
+      }
+    } catch {}
+
+    // 2. Direct catalog fallback if RPC returned empty
+    if (tables.length === 0) {
+      try {
+        const { data: catData } = await supabaseAdmin.rpc("exec_sql_query", {
+          query:
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name NOT IN ('schema_migrations', 'audit_log') ORDER BY table_name",
+        });
+        if (Array.isArray(catData)) {
+          tables = catData
+            .map((t: { table_name?: string }) => t.table_name || "")
+            .filter(Boolean);
+        }
+      } catch {}
     }
 
-    const tables = Array.isArray(tablesData) ? tablesData : [];
     const results = await Promise.all(
-      tables.map(async (tbl: { table_name?: string } | string) => {
-        const name = typeof tbl === "string" ? tbl : tbl.table_name || "";
-        const [colsRes, countRes] = await Promise.all([
-          supabaseAdmin.rpc("get_table_columns", { target_table: name }),
-          supabaseAdmin.rpc("get_table_row_count", { target_table: name }),
-        ]);
-        const columns = colsRes.data || [];
-        const countData = countRes.data as { count?: number } | null;
-        const row_count = countData?.count ?? 0;
+      tables.map(async (name: string) => {
+        let columns: unknown[] = [];
+        let row_count = 0;
+
+        try {
+          const [colsRes, countRes] = await Promise.all([
+            supabaseAdmin.rpc("get_table_columns", { target_table: name }),
+            supabaseAdmin.rpc("get_table_row_count", { target_table: name }),
+          ]);
+          columns = Array.isArray(colsRes.data) ? colsRes.data : [];
+          const countData = countRes.data as { count?: number } | null;
+          row_count = typeof countData?.count === "number" ? countData.count : 0;
+        } catch {}
+
+        if (columns.length === 0) {
+          try {
+            const { data: cData } = await supabaseAdmin.rpc("exec_sql_query", {
+              query: `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${name.replace(/'/g, "''")}' ORDER BY ordinal_position`,
+            });
+            if (Array.isArray(cData)) {
+              columns = cData.map((c: { column_name?: string; data_type?: string; is_nullable?: string }) => ({
+                column_name: c.column_name || "",
+                data_type: c.data_type || "text",
+                is_nullable: c.is_nullable || "YES",
+                is_primary_key: false,
+                is_unique: false,
+              }));
+            }
+          } catch {}
+        }
+
         return {
           table_name: name,
           columns,
@@ -73,7 +116,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ detail: msg }, { status: 400 });
     }
 
-    // Log to audit
     await supabaseAdmin.rpc("log_audit", {
       p_table_name: table_name,
       p_action: "CREATE_TABLE",
