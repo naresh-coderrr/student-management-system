@@ -18,7 +18,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
--- 2. Function to execute SELECT queries and return JSON results
+-- 2. Function to execute queries (SELECT, INSERT, UPDATE, DELETE with RETURNING) and return JSON results
 CREATE OR REPLACE FUNCTION exec_sql_query(query text)
 RETURNS json
 LANGUAGE plpgsql
@@ -27,8 +27,20 @@ SET search_path = public
 AS $$
 DECLARE
     result json;
+    trimmed_query text;
 BEGIN
-    EXECUTE 'SELECT COALESCE(json_agg(row_to_json(t)), ''[]''::json) FROM (' || query || ') t' INTO result;
+    trimmed_query := trim(query);
+    trimmed_query := rtrim(trimmed_query, ';');
+    
+    -- If query starts with INSERT, UPDATE, or DELETE (case-insensitive)
+    IF trimmed_query ~* '^(INSERT|UPDATE|DELETE)\s' THEN
+        IF NOT trimmed_query ~* '\mRETURNING\M' THEN
+            trimmed_query := trimmed_query || ' RETURNING *';
+        END IF;
+        EXECUTE 'WITH mod_cte AS (' || trimmed_query || ') SELECT COALESCE(json_agg(row_to_json(mod_cte)), ''[]''::json) FROM mod_cte' INTO result;
+    ELSE
+        EXECUTE 'SELECT COALESCE(json_agg(row_to_json(t)), ''[]''::json) FROM (' || trimmed_query || ') t' INTO result;
+    END IF;
     RETURN result;
 EXCEPTION WHEN OTHERS THEN
     RETURN json_build_object('error', SQLERRM, 'detail', SQLSTATE);

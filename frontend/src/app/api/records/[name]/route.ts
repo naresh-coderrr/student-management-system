@@ -108,7 +108,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ name: s
 
     const colNames = keys.map(quoteIdent).join(", ");
     const colValues = keys.map((k) => quoteLiteral(data[k])).join(", ");
-    const sql = `INSERT INTO ${quoteIdent(decodedName)} (${colNames}) VALUES (${colValues}) RETURNING *;`;
+    const sql = `WITH inserted AS (INSERT INTO ${quoteIdent(decodedName)} (${colNames}) VALUES (${colValues}) RETURNING *) SELECT * FROM inserted;`;
 
     const { data: resData, error } = await supabaseAdmin.rpc("exec_sql_query", { query: sql });
     if (error || (resData && (resData as { error?: string }).error)) {
@@ -157,7 +157,7 @@ export async function PUT(req: Request, { params }: { params: Promise<{ name: st
     const oldData = oldRows[0] || null;
 
     const setClauses = Object.entries(updates).map(([k, v]) => `${quoteIdent(k)} = ${quoteLiteral(v)}`);
-    const updateSql = `UPDATE ${quoteIdent(decodedName)} SET ${setClauses.join(", ")} WHERE ${quoteIdent(primary_key_column)} = ${quoteLiteral(primary_key_value)} RETURNING *;`;
+    const updateSql = `WITH updated AS (UPDATE ${quoteIdent(decodedName)} SET ${setClauses.join(", ")} WHERE ${quoteIdent(primary_key_column)} = ${quoteLiteral(primary_key_value)} RETURNING *) SELECT * FROM updated;`;
 
     const { data: updateRes, error } = await supabaseAdmin.rpc("exec_sql_query", { query: updateSql });
     if (error || (updateRes && (updateRes as { error?: string }).error)) {

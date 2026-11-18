@@ -104,36 +104,50 @@ CRITICAL RULES:
   "affected_table": "Exact_Table_Name"
 }`;
 
-    const promptMessages = [
-      { role: "user", parts: [{ text: `${systemPrompt}\n\nUser request: ${message}` }] },
-    ];
-
-    const candidateText = await callGemini(promptMessages);
+    const cleanMsg = (message || "").trim();
+    // Match table name case-insensitively with underscores or spaces
+    const matchedTable = tableNames.find((t) =>
+      new RegExp(`\\b${t.replace(/_/g, "([_ ]|)")}\\b`, "i").test(cleanMsg)
+    );
 
     let parsed: { type?: string; message?: string; sql?: string; affected_table?: string } = {};
-    if (candidateText) {
-      try {
-        parsed = JSON.parse(candidateText);
-      } catch {
-        parsed = { type: "info", message: candidateText };
-      }
+
+    // 1. Instant direct match for display/show/list queries (zero wait time, 100% reliable)
+    if (matchedTable && /^(display|show|list|view|fetch|get|select|open|read)\b/i.test(cleanMsg)) {
+      parsed = {
+        type: "sql_preview",
+        message: `Showing all records from "${matchedTable}":`,
+        sql: `SELECT * FROM "${matchedTable}";`,
+        affected_table: matchedTable,
+      };
     } else {
-      // Direct rule-based fallback if all models experienced temporary traffic spike
-      const matchedTable = tableNames.find((t) =>
-        new RegExp(`\\b${t.replace(/_/g, "[_ ]?")}\\b`, "i").test(message)
-      );
-      if (matchedTable && /display|show|list|view|fetch|get/i.test(message)) {
-        parsed = {
-          type: "sql_preview",
-          message: `Showing records from "${matchedTable}":`,
-          sql: `SELECT * FROM "${matchedTable}";`,
-          affected_table: matchedTable,
-        };
+      const promptMessages = [
+        { role: "user", parts: [{ text: `${systemPrompt}\n\nUser request: ${message}` }] },
+      ];
+
+      const candidateText = await callGemini(promptMessages);
+
+      if (candidateText) {
+        try {
+          parsed = JSON.parse(candidateText);
+        } catch {
+          parsed = { type: "info", message: candidateText };
+        }
       } else {
-        parsed = {
-          type: "info",
-          message: "I could not reach the AI service right now. Please check your connection or try again in a moment.",
-        };
+        // Direct rule-based fallback if all models experienced temporary traffic spike
+        if (matchedTable && /display|show|list|view|fetch|get/i.test(cleanMsg)) {
+          parsed = {
+            type: "sql_preview",
+            message: `Showing records from "${matchedTable}":`,
+            sql: `SELECT * FROM "${matchedTable}";`,
+            affected_table: matchedTable,
+          };
+        } else {
+          parsed = {
+            type: "info",
+            message: "I could not reach the AI service right now. Please check your connection or try again in a moment.",
+          };
+        }
       }
     }
 
