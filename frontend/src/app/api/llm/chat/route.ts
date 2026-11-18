@@ -5,6 +5,40 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 const WRITE_REGEX = /^\s*(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b/i;
 
+const CANDIDATE_MODELS = [
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+];
+
+async function callGemini(contents: unknown[]) {
+  for (const model of CANDIDATE_MODELS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents,
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return text;
+      }
+    } catch {
+      // try next candidate model
+    }
+  }
+  return null;
+}
+
 function previewSelectSql(sql: string): string | null {
   const clean = sql.trim().replace(/;$/, "");
   const updateMatch = clean.match(/UPDATE\s+(.+?)\s+SET\s+.+?\s+WHERE\s+(.+)$/i);
@@ -23,9 +57,9 @@ export async function POST(req: Request) {
   }
 
   try {
-    const { message, conversation_history } = await req.json();
+    const { message } = await req.json();
 
-    // 1. Fetch current schema
+    // 1. Fetch current schema from Supabase
     const { data: tablesData } = await supabaseAdmin.rpc("get_user_tables");
     const tables = Array.isArray(tablesData) ? tablesData : [];
     const schemaDetails = await Promise.all(
@@ -36,79 +70,122 @@ export async function POST(req: Request) {
       })
     );
 
+    const tableNames = schemaDetails.map((s) => s.table);
+
     const schemaText = schemaDetails
       .map(
         (s) =>
-          `Table: ${s.table}\n` +
+          `Table: "${s.table}"\n` +
           (Array.isArray(s.columns)
-            ? s.columns.map((c: { column_name?: string; data_type?: string; is_primary_key?: boolean }) => `  - ${c.column_name} (${c.data_type})${c.is_primary_key ? " [PK]" : ""}`).join("\n")
+            ? s.columns
+                .map(
+                  (c: { column_name?: string; data_type?: string; is_primary_key?: boolean }) =>
+                    `  - "${c.column_name}" (${c.data_type})${c.is_primary_key ? " [PRIMARY KEY]" : ""}`
+                )
+                .join("\n")
             : "")
       )
       .join("\n\n");
 
-    const systemPrompt = `You are an intelligent database assistant for a Student Management System.
+    const systemPrompt = `You are the AI Database Assistant for the Student Management System.
 CURRENT DATABASE SCHEMA:
 ${schemaText || "No user tables exist yet."}
 
-RULES:
-1. Always generate valid PostgreSQL SQL for user requests.
-2. If the user asks to query or inspect data, generate a SELECT query.
-3. If the user asks to modify (INSERT, UPDATE, DELETE, CREATE TABLE, ALTER TABLE, DROP TABLE), generate the exact SQL.
-4. You MUST respond with ONLY a valid JSON object matching this schema:
+CRITICAL RULES:
+1. Always generate valid PostgreSQL SQL.
+2. ALWAYS wrap all table and column names in double quotes exactly matching the casing in the schema above (for example: "BEEE_Students", "SEEE_Students").
+3. For inspection/display requests (like "display me the table beee_students" or "show all students"), generate a clean "SELECT * FROM \\"exact_table_name\\";" query.
+4. Output EXACTLY ONE single SQL statement in the "sql" field. Never chain multiple queries with semicolons.
+5. You MUST return ONLY a JSON object matching this schema:
 {
   "type": "info" | "sql_preview" | "confirm_action",
-  "message": "Clear explanation in English of what you did or what will happen",
-  "sql": "SELECT / INSERT / UPDATE / etc (optional if pure question)",
-  "affected_table": "table_name_if_applicable"
+  "message": "Friendly explanation of what you are showing or what will be modified",
+  "sql": "SELECT / INSERT / UPDATE / etc",
+  "affected_table": "Exact_Table_Name"
 }`;
 
     const promptMessages = [
       { role: "user", parts: [{ text: `${systemPrompt}\n\nUser request: ${message}` }] },
     ];
 
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: promptMessages,
-          generationConfig: {
-            temperature: 0.2,
-            responseMimeType: "application/json",
-          },
-        }),
-      }
-    );
-
-    const geminiData = await geminiRes.json();
-    const candidateText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidateText = await callGemini(promptMessages);
 
     let parsed: { type?: string; message?: string; sql?: string; affected_table?: string } = {};
-    try {
-      parsed = JSON.parse(candidateText);
-    } catch {
-      parsed = { type: "info", message: candidateText || "I could not process your request." };
+    if (candidateText) {
+      try {
+        parsed = JSON.parse(candidateText);
+      } catch {
+        parsed = { type: "info", message: candidateText };
+      }
+    } else {
+      // Direct rule-based fallback if all models experienced temporary traffic spike
+      const matchedTable = tableNames.find((t) =>
+        new RegExp(`\\b${t.replace(/_/g, "[_ ]?")}\\b`, "i").test(message)
+      );
+      if (matchedTable && /display|show|list|view|fetch|get/i.test(message)) {
+        parsed = {
+          type: "sql_preview",
+          message: `Showing records from "${matchedTable}":`,
+          sql: `SELECT * FROM "${matchedTable}";`,
+          affected_table: matchedTable,
+        };
+      } else {
+        parsed = {
+          type: "info",
+          message: "I could not reach the AI service right now. Please check your connection or try again in a moment.",
+        };
+      }
     }
 
-    const generatedSql = (parsed.sql || "").trim();
+    let generatedSql = (parsed.sql || "").trim();
+    let previewOverride: string | null = null;
 
-    // If it's a read-only query (SELECT)
+    if (generatedSql.includes(";")) {
+      const parts = generatedSql
+        .split(";")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const writePart = parts.find((p) => WRITE_REGEX.test(p));
+      const readPart = parts.find((p) => /^\s*(SELECT|WITH)\b/i.test(p));
+      if (writePart) {
+        generatedSql = writePart + ";";
+        if (readPart) previewOverride = readPart;
+      } else if (readPart) {
+        generatedSql = readPart + ";";
+      } else if (parts.length > 0) {
+        generatedSql = parts[0] + ";";
+      }
+    }
+
+    // Fix casing on table names in generated SQL to match PostgreSQL schema exactly
+    for (const realName of tableNames) {
+      const pattern = new RegExp(`(?:"?${realName}"?)(?=[\\s;,]|$|\\))`, "gi");
+      generatedSql = generatedSql.replace(pattern, `"${realName}"`);
+    }
+
+    // 1. Read-only query (SELECT) -> Fetch and return the data immediately!
     if (generatedSql && !WRITE_REGEX.test(generatedSql)) {
-      const { data: queryResult, error: qErr } = await supabaseAdmin.rpc("exec_sql_query", { query: generatedSql });
+      const { data: queryResult, error: qErr } = await supabaseAdmin.rpc("exec_sql_query", {
+        query: generatedSql,
+      });
+      const rows = Array.isArray(queryResult) ? queryResult : [];
       return NextResponse.json({
         type: "sql_preview",
-        message: parsed.message || "Here are the query results:",
+        message:
+          parsed.message ||
+          (rows.length > 0
+            ? `Found ${rows.length} record(s):`
+            : "No records found in this table."),
         sql: generatedSql,
-        rows: queryResult || [],
+        preview_data: rows,
         error: qErr?.message,
       });
     }
 
-    // If it's a write query (INSERT / UPDATE / DELETE / DDL) -> Requires confirmation!
+    // 2. Data modification query (INSERT / UPDATE / DELETE / DDL) -> Requires confirmation!
     if (generatedSql && WRITE_REGEX.test(generatedSql)) {
       let previewRows: unknown[] = [];
-      const previewSql = previewSelectSql(generatedSql);
+      const previewSql = previewOverride || previewSelectSql(generatedSql);
       if (previewSql) {
         try {
           const { data: pData } = await supabaseAdmin.rpc("exec_sql_query", { query: previewSql });
@@ -116,7 +193,6 @@ RULES:
         } catch {}
       }
 
-      // Encode the pending action securely
       const actionPayload = {
         sql: generatedSql,
         table: parsed.affected_table || "database",

@@ -3,6 +3,12 @@ import { verifyAuthUser } from "@/lib/supabase-server";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
+const CANDIDATE_MODELS = [
+  "gemini-3.1-flash-lite",
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
+];
+
 const APP_GUIDE_CONTEXT = `
 Student Management System Documentation & User Guide:
 
@@ -25,6 +31,7 @@ Student Management System Documentation & User Guide:
 3. Assistant / Chatbot:
 - Click the floating round chat button in the bottom right corner.
 - You can ask questions in natural language, for example:
+  - "display me the table beee_students"
   - "Show me all students with grade A"
   - "Change student name from John to Jonathan where roll number is 101"
   - "Create a new table called Courses with id, course_name, and credits"
@@ -49,22 +56,31 @@ ${APP_GUIDE_CONTEXT}
 
 User question: ${question || "How do I use this system?"}`;
 
-    const geminiRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: systemPrompt }] }],
-          generationConfig: {
-            temperature: 0.3,
-          },
-        }),
-      }
-    );
+    let answer = "";
+    for (const model of CANDIDATE_MODELS) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts: [{ text: systemPrompt }] }],
+            generationConfig: {
+              temperature: 0.3,
+            },
+          }),
+        });
+        if (res.ok) {
+          const geminiData = await res.json();
+          answer = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          if (answer) break;
+        }
+      } catch {}
+    }
 
-    const geminiData = await geminiRes.json();
-    const answer = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Here is information on using the system.";
+    if (!answer) {
+      answer = "You can create tables, view records, and ask the assistant to query or modify data.";
+    }
 
     return NextResponse.json({ answer });
   } catch (err: unknown) {

@@ -1,8 +1,8 @@
 import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabasePublishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || "";
-const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || "";
+const supabaseUrl = process.env.SUPABASE_URL || "https://wkhcnhuxweguxnnzdemk.supabase.co";
+const supabasePublishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "dummy";
+const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY || "dummy";
 
 export const supabaseAdmin = createClient(supabaseUrl, supabaseSecretKey);
 export const supabasePublic = createClient(supabaseUrl, supabasePublishableKey);

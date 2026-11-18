@@ -184,9 +184,12 @@ export function HoverChat() {
                     )}
                   </div>
                 )}
-                {turn.reply?.type === "info" && !!turn.reply.preview_data?.length && (
-                  <div className="mt-2">
-                    <RowsPreview rows={turn.reply.preview_data} />
+                {(turn.reply?.type === "sql_preview" || turn.reply?.type === "info") && (
+                  <div className="mt-2 space-y-1 text-foreground">
+                    <RowsPreview
+                      rows={turn.reply.preview_data}
+                      emptyLabel={turn.reply.type === "sql_preview" ? "No matching records found in this table." : undefined}
+                    />
                   </div>
                 )}
               </article>

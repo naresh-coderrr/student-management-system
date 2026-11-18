@@ -58,9 +58,31 @@ def _statement(sql: str) -> str:
     return text
 
 
+def _split_statements(sql: str) -> list[str]:
+    text = _statement(sql)
+    stmts = []
+    current = []
+    in_quote = False
+    for char in text:
+        if char == "'":
+            in_quote = not in_quote
+            current.append(char)
+        elif char == ";" and not in_quote:
+            stmt = "".join(current).strip()
+            if stmt:
+                stmts.append(stmt)
+            current = []
+        else:
+            current.append(char)
+    last = "".join(current).strip()
+    if last:
+        stmts.append(last)
+    return stmts
+
+
 def _is_single_statement(sql: str) -> bool:
-    body = sql.strip().rstrip(";").strip()
-    return ";" not in body
+    stmts = _split_statements(sql)
+    return len(stmts) <= 1
 
 
 def _leading_keyword(sql: str) -> str:
@@ -143,15 +165,22 @@ async def chat(body: ChatRequest, request: Request):
         )
 
         sql = (response.get("sql") or "").strip()
+        stmts = _split_statements(sql) if sql else []
+        preview_override = None
+
+        if len(stmts) > 1:
+            write_stmts = [s for s in stmts if _leading_keyword(s) in WRITE_PREFIXES]
+            read_stmts = [s for s in stmts if _leading_keyword(s) in READ_PREFIXES]
+            if write_stmts:
+                sql = write_stmts[0] + ";"
+                if read_stmts:
+                    preview_override = read_stmts[0]
+            elif read_stmts:
+                sql = read_stmts[0] + ";"
+            else:
+                sql = stmts[0] + ";"
+
         keyword = _leading_keyword(sql) if sql else ""
-        if sql and not _is_single_statement(sql):
-            return {
-                "type": "error",
-                "message": "The assistant prepared more than one SQL statement. Ask again for a single change.",
-                "sql": "",
-                "preview_data": [],
-                "action_id": "",
-            }
         if sql and keyword and keyword not in READ_PREFIXES and keyword not in WRITE_PREFIXES:
             return {
                 "type": "error",
@@ -164,7 +193,8 @@ async def chat(body: ChatRequest, request: Request):
         # Writes always wait for the user, even if the model forgot to ask.
         if sql and _is_write(sql):
             response["type"] = "confirm_action"
-            preview_sql = _preview_select(sql)
+            response["sql"] = sql
+            preview_sql = preview_override or _preview_select(sql)
             if preview_sql:
                 fetched = supabase_service.query_sql(preview_sql)
                 if isinstance(fetched, list):
